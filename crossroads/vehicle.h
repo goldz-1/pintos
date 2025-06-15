@@ -25,7 +25,7 @@ struct vehicle_info {
 };
 
 void vehicle_loop(void *vi);
-
 void parse_vehicles(struct vehicle_info *vehicle_info, char *input);
+void init_on_mainthread(int thread_cnt);
 
 #endif /* __PROJECTS_PROJECT2_VEHICLE_H__ */
