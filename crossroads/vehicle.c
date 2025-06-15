@@ -130,100 +130,110 @@ static int is_position_outside(struct position pos)
     return (pos.row == -1 || pos.col == -1);
 }
 
+/* Check if vehicle needs traffic light permission */
+static bool needs_traffic_light_check(struct position current, struct position next) {
+    /* Only check when entering intersection from outside */
+    bool current_in_intersection = (current.row >= 2 && current.row <= 4 && current.col >= 2 && current.col <= 4);
+    bool next_in_intersection = (next.row >= 2 && next.row <= 4 && next.col >= 2 && next.col <= 4);
+
+    /* Need to check if moving into intersection from outside */
+    return (!current_in_intersection && next_in_intersection);
+}
+
 /* return 0:termination, 1:success, -1:fail */
 static int try_move(int start, int dest, int step, struct vehicle_info* vi)
 {
     struct position pos_cur, pos_next;
-    int current_zone = -1, next_zone = -1;
-    bool is_intersection_move = false;
+    bool was_in_intersection = false;
+    bool will_be_in_intersection = false;
 
     pos_next = vehicle_path[start][dest][step];
     pos_cur = vi->position;
 
+    /* Check for termination */
     if (vi->state == VEHICLE_STATUS_RUNNING) {
         if (is_position_outside(pos_next)) {
-            vi->position.row = vi->position.col = -1;
-            current_zone = get_zone_for_position(pos_cur);
-            if (current_zone != -1) {
-                int zones[] = { current_zone };
+            /* Vehicle reaches destination */
+            was_in_intersection = is_intersection_position(pos_cur);
+
+            if (was_in_intersection) {
+                int zones[] = { ZONE_CENTER };
                 release_zones(vi, zones, 1);
-                priority_sema_up(&deadlock_system->intersection_capacity);
             }
-            else {
-                lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+
+            if (!is_position_outside(pos_cur)) {
+                /* Release map lock */
+                if (vi->map_locks[pos_cur.row][pos_cur.col].holder == thread_current()) {
+                    lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+                }
             }
+            vi->position.row = vi->position.col = -1;
             return 0;
         }
     }
 
-    next_zone = get_zone_for_position(pos_next);
-    is_intersection_move = (next_zone != -1);
-
-    if (is_intersection_move) {
-        if (!can_enter_intersection(vi, pos_next)) {
-            printf("[DEBUG] Vehicle %c: blocked - cannot enter intersection at step %d\n", vi->id, crossroads_step);
-            return -1;
+    /* Check traffic light if needed */
+    if (vi->state == VEHICLE_STATUS_RUNNING &&
+        needs_traffic_light_check(pos_cur, pos_next)) {
+        if (!can_vehicle_proceed(pos_cur, pos_next)) {
+            printf("VEHICLE %c waiting: red light at (%d,%d) -> (%d,%d) step %d\n",
+                vi->id, pos_cur.row, pos_cur.col, pos_next.row, pos_next.col, crossroads_step);
+            return -1;  /* Wait for green light */
         }
+    }
 
-        if (vi->type == VEHICL_TYPE_AMBULANCE && (vi->golden_time - crossroads_step) <= 2) {
-            lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
-        }
-        else {
-            if (!lock_try_acquire(&vi->map_locks[pos_next.row][pos_next.col])) {
-                int zones[] = { next_zone };
-                release_zones(vi, zones, 1);
-                priority_sema_up(&deadlock_system->intersection_capacity);
-                printf("[DEBUG] Vehicle %c: failed to acquire lock at %d,%d\n", vi->id, pos_next.row, pos_next.col);
+    will_be_in_intersection = is_intersection_position(pos_next);
+
+    /* Check intersection entry restrictions */
+    if (will_be_in_intersection && vi->state == VEHICLE_STATUS_RUNNING) {
+        if (!is_intersection_position(pos_cur)) {
+            /* Entering intersection from outside */
+            if (!can_enter_intersection(vi, pos_next)) {
                 return -1;
-            }
-        }
-
-        if (vi->state == VEHICLE_STATUS_READY) {
-            vi->state = VEHICLE_STATUS_RUNNING;
-        }
-        else {
-            current_zone = get_zone_for_position(pos_cur);
-            if (current_zone != -1 && current_zone != next_zone) {
-                int zones[] = { current_zone };
-                release_zones(vi, zones, 1);
-            }
-            else if (current_zone == -1) {
-                lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
             }
         }
     }
+
+    /* Try to acquire map lock for next position */
+    if (vi->type == VEHICL_TYPE_AMBULANCE && (vi->golden_time - crossroads_step) <= 2) {
+        /* Emergency ambulance - blocking acquire */
+        lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
+    }
     else {
-        if (vi->type == VEHICL_TYPE_AMBULANCE && (vi->golden_time - crossroads_step) <= 2) {
-            lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
-        }
-        else {
-            if (!lock_try_acquire(&vi->map_locks[pos_next.row][pos_next.col])) {
-                printf("[DEBUG] Vehicle %c: failed to acquire non-intersection lock at %d,%d\n", vi->id, pos_next.row, pos_next.col);
-                return -1;
+        /* Try non-blocking acquire */
+        if (!lock_try_acquire(&vi->map_locks[pos_next.row][pos_next.col])) {
+            /* Failed to get position lock */
+            if (will_be_in_intersection && !is_intersection_position(pos_cur)) {
+                /* Release intersection capacity if we just acquired it */
+                int zones[] = { ZONE_CENTER };
+                release_zones(vi, zones, 1);
             }
+            return -1;
+        }
+    }
+
+    /* Successfully acquired new position, release old position */
+    if (vi->state == VEHICLE_STATUS_READY) {
+        vi->state = VEHICLE_STATUS_RUNNING;
+    }
+    else if (!is_position_outside(pos_cur)) {
+        was_in_intersection = is_intersection_position(pos_cur);
+
+        /* Release old intersection capacity if leaving intersection */
+        if (was_in_intersection && !will_be_in_intersection) {
+            int zones[] = { ZONE_CENTER };
+            release_zones(vi, zones, 1);
         }
 
-        if (vi->state == VEHICLE_STATUS_READY) {
-            vi->state = VEHICLE_STATUS_RUNNING;
-        }
-        else {
-            current_zone = get_zone_for_position(pos_cur);
-            if (current_zone != -1) {
-                int zones[] = { current_zone };
-                release_zones(vi, zones, 1);
-                priority_sema_up(&deadlock_system->intersection_capacity);
-            }
-            else {
-                lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
-            }
+        /* Release map lock for old position */
+        if (vi->map_locks[pos_cur.row][pos_cur.col].holder == thread_current()) {
+            lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
         }
     }
 
     vi->position = pos_next;
-
     return 1;
 }
-
 
 static void wait_for_step_completion(void)
 {
