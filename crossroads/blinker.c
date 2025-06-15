@@ -224,17 +224,11 @@ bool can_vehicle_proceed(struct position current, struct position next) {
     priority_lock_acquire(&blinker_control_lock, PRIORITY_NORMAL_VEHICLE);
 
     /* Determine movement direction */
-    bool is_ns_movement = (current.col == next.col) &&
-        ((current.row == 1 && next.row == 2) ||
-            (current.row == 5 && next.row == 4) ||
-            (current.row == 2 && next.row == 1) ||
-            (current.row == 4 && next.row == 5));
+    int row_dif = current.row - next.row;
+    int col_dif = current.col - next.col;
 
-    bool is_ew_movement = (current.row == next.row) &&
-        ((current.col == 1 && next.col == 2) ||
-            (current.col == 5 && next.col == 4) ||
-            (current.col == 2 && next.col == 1) ||
-            (current.col == 4 && next.col == 5));
+    bool is_ns_movement = (current.col == next.col) && (row_dif == 1 || row_dif == -1);
+    bool is_ew_movement = (current.row == next.row) && (col_dif == 1 || col_dif == -1);
 
     /* Check if movement matches current light state */
     if (is_ns_movement && current_blinker_state != BLINKER_NS_GREEN) {

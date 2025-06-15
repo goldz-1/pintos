@@ -141,11 +141,8 @@ static int try_move(int start, int dest, int step, struct vehicle_info* vi)
     pos_cur = vi->position;
 
     if (vi->state == VEHICLE_STATUS_RUNNING) {
-        /* Check termination */
         if (is_position_outside(pos_next)) {
-            /* Release current position */
             vi->position.row = vi->position.col = -1;
-
             current_zone = get_zone_for_position(pos_cur);
             if (current_zone != -1) {
                 int zones[] = { current_zone };
@@ -153,45 +150,38 @@ static int try_move(int start, int dest, int step, struct vehicle_info* vi)
                 priority_sema_up(&deadlock_system->intersection_capacity);
             }
             else {
-                /* Release lock for non-intersection areas */
                 lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
             }
             return 0;
         }
     }
 
-    /* Check if entering intersection */
     next_zone = get_zone_for_position(pos_next);
     is_intersection_move = (next_zone != -1);
 
     if (is_intersection_move) {
-        /* Use deadlock prevention system for intersection */
         if (!can_enter_intersection(vi, pos_next)) {
+            printf("[DEBUG] Vehicle %c: blocked - cannot enter intersection at step %d\n", vi->id, crossroads_step);
             return -1;
         }
 
-        /* Try to acquire map lock */
-        if (vi->type == VEHICL_TYPE_AMBULANCE &&
-            (vi->golden_time - crossroads_step) <= 2) {
-            /* Emergency ambulance forces entry */
+        if (vi->type == VEHICL_TYPE_AMBULANCE && (vi->golden_time - crossroads_step) <= 2) {
             lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
         }
         else {
             if (!lock_try_acquire(&vi->map_locks[pos_next.row][pos_next.col])) {
-                /* Failed to get lock, release zone */
                 int zones[] = { next_zone };
                 release_zones(vi, zones, 1);
                 priority_sema_up(&deadlock_system->intersection_capacity);
+                printf("[DEBUG] Vehicle %c: failed to acquire lock at %d,%d\n", vi->id, pos_next.row, pos_next.col);
                 return -1;
             }
         }
 
-        /* Update vehicle state */
         if (vi->state == VEHICLE_STATUS_READY) {
             vi->state = VEHICLE_STATUS_RUNNING;
         }
         else {
-            /* Release previous position */
             current_zone = get_zone_for_position(pos_cur);
             if (current_zone != -1 && current_zone != next_zone) {
                 int zones[] = { current_zone };
@@ -203,14 +193,12 @@ static int try_move(int start, int dest, int step, struct vehicle_info* vi)
         }
     }
     else {
-        /* Non-intersection movement */
-        if (vi->type == VEHICL_TYPE_AMBULANCE &&
-            (vi->golden_time - crossroads_step) <= 2) {
-            /* Emergency ambulance */
+        if (vi->type == VEHICL_TYPE_AMBULANCE && (vi->golden_time - crossroads_step) <= 2) {
             lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
         }
         else {
             if (!lock_try_acquire(&vi->map_locks[pos_next.row][pos_next.col])) {
+                printf("[DEBUG] Vehicle %c: failed to acquire non-intersection lock at %d,%d\n", vi->id, pos_next.row, pos_next.col);
                 return -1;
             }
         }
@@ -219,7 +207,6 @@ static int try_move(int start, int dest, int step, struct vehicle_info* vi)
             vi->state = VEHICLE_STATUS_RUNNING;
         }
         else {
-            /* Release previous position */
             current_zone = get_zone_for_position(pos_cur);
             if (current_zone != -1) {
                 int zones[] = { current_zone };
@@ -232,11 +219,11 @@ static int try_move(int start, int dest, int step, struct vehicle_info* vi)
         }
     }
 
-    /* Update position */
     vi->position = pos_next;
 
     return 1;
 }
+
 
 static void wait_for_step_completion(void)
 {
@@ -389,6 +376,10 @@ void vehicle_loop(void* _vi)
                 printf("Vehicle %c arrived at destination\n", vi->id);
             }
             break;
+        }
+
+        if (res == -1) {
+            printf("Vehicle %c blocked at step %d\n", vi->id, step);
         }
 
         /* Wait for next step */

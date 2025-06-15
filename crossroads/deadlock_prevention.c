@@ -94,49 +94,51 @@ int get_movement_direction(struct position from, struct position to)
 
 bool can_enter_intersection(struct vehicle_info* vi, struct position next_pos)
 {
-    if (!is_intersection_position(next_pos)) {
-        return true;
-    }
-
     int zone = get_zone_for_position(next_pos);
     if (zone == -1) return true;
 
     /* Check traffic light before entering intersection */
     if (!can_vehicle_proceed(vi->position, next_pos)) {
-        /* Wait for green light if not ambulance in emergency */
         if (vi->type == VEHICL_TYPE_AMBULANCE) {
             int time_left = vi->golden_time - crossroads_step;
             if (time_left <= 2) {
-                /* Emergency override for ambulance */
                 printf("AMBULANCE %c OVERRIDING red light!\n", vi->id);
+                return true;
             }
             else {
-                /* Non-emergency ambulance waits for green */
                 return false;
             }
         }
         else {
-            /* Normal vehicle must wait for green */
+            printf("VEHICLE %c waiting: red light at (%d,%d) ¡æ (%d,%d) step %d\n",
+                vi->id, vi->position.row, vi->position.col, next_pos.row, next_pos.col, crossroads_step);
             return false;
         }
     }
+
 
     if (vi->type == VEHICL_TYPE_AMBULANCE) {
         return handle_ambulance_priority(vi, next_pos);
     }
 
     if (!is_safe_movement(vi->position, next_pos, vi)) {
+        printf("[DEBUG] %c: unsafe movement from (%d,%d) to (%d,%d)\n",
+            vi->id, vi->position.row, vi->position.col, next_pos.row, next_pos.col);
         return false;
     }
 
     int priority = get_vehicle_priority(vi);
-
-    if (!priority_sema_try_down(&deadlock_system->intersection_capacity, priority)) {
+    bool sema_try = priority_sema_try_down(&deadlock_system->intersection_capacity, priority);
+    if (!sema_try) {
+        printf("[DEBUG] %c: intersection capacity full\n", vi->id);
         return false;
     }
 
-    if (!priority_lock_try_acquire(&deadlock_system->zone_locks[zone], priority)) {
+
+    bool lock_try = priority_lock_try_acquire(&deadlock_system->zone_locks[zone], priority);
+    if (!lock_try) {
         priority_sema_up(&deadlock_system->intersection_capacity);
+        printf("[DEBUG] %c: failed to acquire zone lock %d\n", vi->id, zone);
         return false;
     }
 
@@ -206,60 +208,43 @@ void release_zones(struct vehicle_info* vi, int zones[], int num_zones)
     lock_release(&deadlock_system->resource_order_lock);
 }
 
+
 bool is_safe_movement(struct position from, struct position to, struct vehicle_info* vi)
 {
     lock_acquire(&safety_system->safety_check_lock);
 
     bool safe = true;
 
-    /* Special case: Check for crossing conflicts at intersection center */
-    /* B->D (6,4)->(0,4) and C->A (2,6)->(2,0) conflict at center */
-    /* D->A (0,2)->(2,0) and A->D (4,0)->(0,4) can coexist */
-
-    /* Get movement direction */
-    char from_point = '?';
-    char to_point = '?';
-
-    /* Determine source point */
-    if (from.row == 4 && from.col == 0) from_point = 'A';
-    else if (from.row == 6 && from.col == 4) from_point = 'B';
-    else if (from.row == 2 && from.col == 6) from_point = 'C';
-    else if (from.row == 0 && from.col == 2) from_point = 'D';
-
-    /* Determine destination point */
-    if (to.row == 2 && to.col == 0) to_point = 'A';
-    else if (to.row == 6 && to.col == 2) to_point = 'B';
-    else if (to.row == 4 && to.col == 6) to_point = 'C';
-    else if (to.row == 0 && to.col == 4) to_point = 'D';
-
-    /* Check for specific conflicting movements */
-    if ((from_point == 'B' && to_point == 'D') || (from_point == 'C' && to_point == 'A')) {
-        /* B->D or C->A movement - check if the other is happening */
-        for (int i = 0; i < NUM_ZONES; i++) {
-            if (deadlock_system->zones_occupied[i] &&
-                deadlock_system->zone_holders[i] != vi->id) {
-                /* Check if other vehicle is doing C->A or B->D */
-                if ((from_point == 'B' && safety_system->conflicting_moves[ZONE_SOUTH_ENTRY][i]) ||
-                    (from_point == 'C' && safety_system->conflicting_moves[ZONE_WEST_ENTRY][i])) {
-                    safe = false;
-                    break;
-                }
-            }
-        }
-    }
-
-    /* General zone conflict check */
     int from_zone = get_zone_for_position(from);
     int to_zone = get_zone_for_position(to);
 
-    if (from_zone != -1 && to_zone != -1) {
-        for (int i = 0; i < NUM_ZONES; i++) {
-            if (deadlock_system->zones_occupied[i] &&
-                deadlock_system->zone_holders[i] != vi->id) {
-                if (safety_system->conflicting_moves[to_zone][i]) {
-                    safe = false;
-                    break;
-                }
+    bool emergency_override = false;
+    if (vi->type == VEHICL_TYPE_AMBULANCE && (vi->golden_time - crossroads_step <= 2)) {
+        emergency_override = true;
+    }
+
+    printf("(%d, %d)", from_zone, to_zone);
+
+    if (to_zone != -1) {
+        lock_release(&safety_system->safety_check_lock);
+        return true;
+    }
+
+
+    for (int i = 0; i < NUM_ZONES; i++) {
+        if (deadlock_system->zones_occupied[i] &&
+            deadlock_system->zone_holders[i] != vi->id) {
+
+            bool conflict = safety_system->conflicting_moves[to_zone][i];
+
+            if (conflict && emergency_override) {
+                printf("AMBULANCE %c OVERRIDING conflict: zone %d vs %d\n", vi->id, to_zone, i);
+                continue;
+            }
+
+            if (conflict) {
+                safe = false;
+                break;
             }
         }
     }
@@ -375,3 +360,4 @@ void preempt_normal_vehicles(struct vehicle_info* ambulance)
         }
     }
 }
+
