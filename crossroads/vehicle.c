@@ -124,6 +124,8 @@ static int is_position_outside(struct position pos)
 static int try_move(int start, int dest, int step, struct vehicle_info *vi)
 {
     struct position pos_cur, pos_next;
+    int current_zone = -1, next_zone = -1;
+    bool is_intersection_move = false;
 
     pos_next = vehicle_path[start][dest][step];
     pos_cur = vi->position;
@@ -133,21 +135,77 @@ static int try_move(int start, int dest, int step, struct vehicle_info *vi)
         if (is_position_outside(pos_next)) {
             /* actual move */
             vi->position.row = vi->position.col = -1;
-            /* release previous */
-            lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+            
+            current_zone = get_zone_for_position(pos_cur);
+            if (current_zone != -1) {
+                int zones[] = { current_zone };
+                release_zones(vi, zones, 1);
+                priority_sema_up(&deadlock_system->intersection_capacity);
+            }
+            else {
+                /* release previous lock for non-intersection areas */
+                lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+            }
             return 0;
         }
     }
 
-    /* lock next position */
-    lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
-    if (vi->state == VEHICLE_STATUS_READY) {
-        /* start this vehicle */
-        vi->state = VEHICLE_STATUS_RUNNING;
-    } else {
-        /* release current position */
-        lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+    // check if intersection
+    next_zone = get_zone_for_position(pos_next);
+    is_intersection_move = (next_zone != -1);
+
+    if (is_intersection_move) {
+        if (!can_enter_intersection(vi, pos_next)) {
+            return -1; // failed
+        }
+
+        int priority = get_vehicle_priority(vi);
+
+        if (vi->type == VEHICL_TYPE_AMBULANCE) {
+            lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
+        }
+        else {
+            if (!lock_try_acquire(&vi->map_locks[pos_next.row][pos_next.col])) {
+                int zones[] = { next_zone };
+                release_zones(vi, zones, 1);
+                priority_sema_up(&deadlock_system->intersection_capacity);
+                return -1;
+            }
+        }
+
+        if (vi->state == VEHICLE_STATUS_READY) {
+            vi->state = VEHICLE_STATUS_RUNNING;
+        }
+        else {
+            current_zone = get_zone_for_position(pos_cur);
+            if (current_zone != -1 && current_zone != next_zone) {
+                int zones[] = { current_zone };
+                release_zones(vi, zones, 1);
+            }
+            else if (current_zone == -1) {
+                lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+            }
+        }
     }
+    else {
+        lock_acquire(&vi->map_locks[pos_next.row][pos_next.col]);
+
+        if (vi->state == VEHICLE_STATUS_READY) {
+            vi->state = VEHICLE_STATUS_RUNNING;
+        }
+        else {
+            current_zone = get_zone_for_position(pos_cur);
+            if (current_zone != -1) {
+                int zones[] = { current_zone };
+                release_zones(vi, zones, 1);
+                priority_sema_up(&deadlock_system->intersection_capacity);
+            }
+            else {
+                lock_release(&vi->map_locks[pos_cur.row][pos_cur.col]);
+            }
+        }
+    }
+
     /* update position */
     vi->position = pos_next;
     
@@ -214,6 +272,9 @@ void init_on_mainthread(int thread_cnt)
         total_active_vehicles = thread_cnt;
         step_sync_initialized = true;
         
+        init_deadlock_prevention();
+        init_intersection_safety();
+
         printf("Step synchronization initialized for %d vehicles\n", thread_cnt);
     }
 }
