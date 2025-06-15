@@ -245,7 +245,35 @@ static bool should_start_vehicle(struct vehicle_info *vi)
     }
     
     // ambulance -> starting when designated time
-    return crossroads_step >= vi->arrival;
+    if (vi->type == VEHICL_TYPE_AMBULANCE) {
+        if (crossroads_step < vi->arrival) {
+            // not yet
+            return false;
+        }
+        else if (crossroads_step == vi->arrival) {
+            printf("AMBULANCE %c DISPATCHED at step %d (Golden time: %d)\n",
+                vi->id, crossroads_step, vi->golden_time);
+            return true;
+        }
+        else {
+            return crossroads_step <= vi->golden_time;
+        }
+    }
+
+    return false;
+}
+
+static void handle_ambulance_waiting(struct vehicle_info* vi)
+{
+    if (vi->type == VEHICL_TYPE_AMBULANCE && crossroads_step < vi->arrival) {
+        int wait_time = vi->arrival - crossroads_step;
+        printf("AMBULANCE %c waiting for dispatch: %d steps remaining\n",
+            vi->id, wait_time);
+
+        if (wait_time <= 3) {
+            printf("AMBULANCE %c STANDBY - dispatching soon!\n", vi->id);
+        }
+    }
 }
 
 static bool check_golden_time(struct vehicle_info *vi)
@@ -297,11 +325,25 @@ void vehicle_loop(void *_vi)
            vi->id, vi->start, vi->dest, 
            vi->type == VEHICL_TYPE_AMBULANCE ? "AMBULANCE" : "NORMAL");
 
+    if (vi->type == VEHICL_TYPE_AMBULANCE) {
+        printf("AMBULANCE %c: arrival=%d, golden_time=%d\n",
+            vi->id, vi->arrival, vi->golden_time);
+    }
+
+
     while (1) {
         // checking starting time
         if (!should_start_vehicle(vi)) {
+            handle_ambulance_waiting(vi);
             wait_for_step_completion();
             continue;
+        }
+
+        if (vi->state == VEHICLE_STATUS_READY && step == 0) {
+            if (vi->type == VEHICL_TYPE_AMBULANCE) {
+                printf("AMBULANCE %c STARTING MISSION at step %d\n",
+                    vi->id, crossroads_step);
+            }
         }
         
         //checking a golden time
@@ -314,13 +356,33 @@ void vehicle_loop(void *_vi)
         res = try_move(start, dest, step, vi);
         if (res == 1) {
             step++;
-            printf("Vehicle %c moved to step %d, position (%d,%d)\n", 
-                   vi->id, step, vi->position.row, vi->position.col);
+            if (vi->type == VEHICL_TYPE_AMBULANCE) {
+                int time_left = vi->golden_time - crossroads_step;
+                printf("AMBULANCE %c moved to step %d, position (%d,%d) - Time left: %d\n",
+                    vi->id, step, vi->position.row, vi->position.col, time_left);
+            }
+            else {
+                printf("Vehicle %c moved to step %d, position (%d,%d)\n",
+                    vi->id, step, vi->position.row, vi->position.col);
+            }
         }
 
         /* termination condition */ 
         if (res == 0) {
-            printf("Vehicle %c reached destination!\n", vi->id);
+            if (vi->type == VEHICL_TYPE_AMBULANCE) {
+                int final_time = crossroads_step;
+                if (final_time <= vi->golden_time) {
+                    printf("AMBULANCE %c MISSION SUCCESS! Arrived at step %d (Golden time: %d)\n",
+                        vi->id, final_time, vi->golden_time);
+                }
+                else {
+                    printf("AMBULANCE %c arrived but MISSED GOLDEN TIME! Final: %d, Deadline: %d\n",
+                        vi->id, final_time, vi->golden_time);
+                }
+            }
+            else {
+                printf("Vehicle %c reached destination!\n", vi->id);
+            }
             break;
         }
 
