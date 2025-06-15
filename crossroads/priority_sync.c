@@ -4,6 +4,8 @@
 #include "threads/interrupt.h"
 #include <stdio.h>
 
+extern int crossroads_step;
+
 // compare priority 
 bool priority_waiter_less(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
 {
